@@ -2,9 +2,9 @@ English | [Русский](README.ru.md)
 
 # Filter Telegram poll participants by answer
 
-A local, read-only Python and Telethon utility. It accepts a link to a
-non-anonymous Telegram poll and the exact text of one answer, then prints the
-people who participated in the poll but did not select that answer.
+A local, read-only Python and Telethon utility. It accepts either a Telegram
+poll link plus exact answer text, or a direct Telegram poll-option link, then
+prints the people who participated in the poll but did not select that answer.
 
 The utility does not write to Telegram, remove anyone, or save the people list
 to a file.
@@ -63,6 +63,8 @@ file.
 
 ## Usage
 
+### Select an answer by text
+
 ```bash
 python list_without_answer.py \
   --poll-link "https://t.me/c/1234567890/42" \
@@ -73,10 +75,46 @@ Answer text matching is exact and case-sensitive. If there is no match or more
 than one answer has the same text, the command displays every available answer
 and exits without a result.
 
+### Select an answer by Telegram option link
+
+Use the link copied for a specific poll answer. It contains the base64url-
+encoded answer identifier in its `option` query parameter:
+
+```bash
+python list_without_answer.py \
+  --option "https://t.me/c/2546560986/6968?option=MA"
+```
+
+`--option` replaces both `--poll-link` and `--answer`; do not combine the two
+input forms. The decoded answer identifier must exist in the referenced poll.
+Telegram documents this link format in
+[Polls and quizzes](https://core.telegram.org/api/poll).
+
+### Show what each listed voter selected
+
+Add `--voted-for` to either input form:
+
+```bash
+python list_without_answer.py \
+  --option "https://t.me/c/2546560986/6968?option=MA" \
+  --voted-for
+```
+
+This appends a `voted for` column containing answer text. Multiple selected
+answers are shown in poll order and separated with `/`. Telegram's free-text
+vote record does not expose the submitted text, so it is shown as
+`[free-text answer; text unavailable]`.
+
 The table columns are ordered as follows:
 
 ```text
 ID  username  first name  last name
+```
+
+With `--voted-for`:
+
+```text
+ID  username  first name  last name  voted for
 ```
 
 The poll question, excluded answer, poll state, and voter counts are printed

@@ -16,10 +16,11 @@ from telegram_poll_answer_filter import (
     friendly_rpc_error,
     load_config,
     load_poll_context,
-    parse_poll_link,
     poll_question,
     print_voter_table,
+    resolve_target_request,
     select_exact_answer,
+    select_option_answer,
     tighten_session_permissions,
     voters_with_answer_count,
     voters_without_answer,
@@ -37,19 +38,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--poll-link",
-        required=True,
-        help="t.me link to the poll message",
+        help="t.me link to the poll message; use together with --answer",
     )
     parser.add_argument(
         "--answer",
-        required=True,
-        help="exact, case-sensitive text of the answer to exclude",
+        help="exact, case-sensitive answer text; use with --poll-link",
+    )
+    parser.add_argument(
+        "--option",
+        help=(
+            "t.me poll-option link containing ?option=...; replaces both "
+            "--poll-link and --answer"
+        ),
+    )
+    parser.add_argument(
+        "--voted-for",
+        action="store_true",
+        help="add a final column with the answer text selected by each voter",
     )
     return parser
 
 
 async def run(args: argparse.Namespace) -> int:
-    location = parse_poll_link(args.poll_link)
+    target_request = resolve_target_request(
+        poll_link=args.poll_link,
+        answer=args.answer,
+        option_link=args.option,
+    )
     config = load_config(BASE_DIR)
     client = create_client(config)
 
@@ -69,9 +84,17 @@ async def run(args: argparse.Namespace) -> int:
             )
 
         context = await load_poll_context(
-            client, location.chat_ref, location.message_id
+            client,
+            target_request.location.chat_ref,
+            target_request.location.message_id,
         )
-        target_answer = select_exact_answer(context.poll, args.answer)
+        if target_request.answer_text is not None:
+            target_answer = select_exact_answer(
+                context.poll, target_request.answer_text
+            )
+        else:
+            assert target_request.option is not None
+            target_answer = select_option_answer(context.poll, target_request.option)
         snapshot = await fetch_vote_snapshot(client, context.chat, context.message.id)
         matching_voters = voters_without_answer(snapshot, target_answer.option)
         selected_count = voters_with_answer_count(snapshot, target_answer.option)
@@ -83,7 +106,10 @@ async def run(args: argparse.Namespace) -> int:
             )
             print()
 
-        print_voter_table(matching_voters)
+        print_voter_table(
+            matching_voters,
+            poll=context.poll if args.voted_for else None,
+        )
         print()
         print(f"Poll: {poll_question(context.poll)}")
         print(f"Excluded answer: {answer_text(target_answer)}")

@@ -82,6 +82,8 @@ class PollVotesAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([voter.id for voter in snapshot.voters], [1, 2, 3])
         self.assertEqual(snapshot.voters[0].selected_options, {b"yes", b"maybe"})
         self.assertEqual(snapshot.voters[2].selected_options, set())
+        self.assertFalse(snapshot.voters[0].used_input_option)
+        self.assertTrue(snapshot.voters[2].used_input_option)
         self.assertEqual([request.id for request in client.requests], [42, 42])
         self.assertEqual(
             [request.offset for request in client.requests], [None, "page-2"]

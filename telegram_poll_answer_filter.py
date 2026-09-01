@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -7,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, errors, functions, types, utils
@@ -33,6 +35,19 @@ class PollLocation:
 
 
 @dataclass(frozen=True)
+class PollOptionLocation:
+    location: PollLocation
+    option: bytes
+
+
+@dataclass(frozen=True)
+class TargetRequest:
+    location: PollLocation
+    answer_text: str | None = None
+    option: bytes | None = None
+
+
+@dataclass(frozen=True)
 class PollContext:
     chat: Any
     message: Any
@@ -49,6 +64,7 @@ class VoterRecord:
     first_name: str | None
     last_name: str | None
     selected_options: frozenset[bytes]
+    used_input_option: bool = False
 
 
 @dataclass(frozen=True)
@@ -157,6 +173,57 @@ def parse_poll_link(link: str) -> PollLocation:
     return PollLocation(chat_ref=chat_ref, message_id=message_id)
 
 
+def parse_option_link(link: str) -> PollOptionLocation:
+    location = parse_poll_link(link)
+    parsed = urlparse(link.strip())
+    values = parse_qs(parsed.query, keep_blank_values=True).get("option", [])
+    if len(values) != 1 or not values[0]:
+        raise PollFilterError(
+            "The --option link must contain exactly one non-empty option parameter."
+        )
+
+    try:
+        encoded_option = values[0].encode("ascii")
+    except UnicodeEncodeError as error:
+        raise PollFilterError(
+            "The option parameter must be a base64url value."
+        ) from error
+
+    padding = b"=" * (-len(encoded_option) % 4)
+    try:
+        option = base64.b64decode(
+            encoded_option + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+    except (binascii.Error, ValueError) as error:
+        raise PollFilterError("The option parameter is not valid base64url.") from error
+    if not option:
+        raise PollFilterError("The decoded poll option must not be empty.")
+    return PollOptionLocation(location=location, option=option)
+
+
+def resolve_target_request(
+    *, poll_link: str | None, answer: str | None, option_link: str | None
+) -> TargetRequest:
+    if option_link is not None:
+        if poll_link is not None or answer is not None:
+            raise PollFilterError(
+                "Use either --option by itself or --poll-link together with --answer."
+            )
+        parsed_option = parse_option_link(option_link)
+        return TargetRequest(
+            location=parsed_option.location,
+            option=parsed_option.option,
+        )
+
+    if poll_link is None or answer is None:
+        raise PollFilterError(
+            "Provide --option, or provide both --poll-link and --answer."
+        )
+    return TargetRequest(location=parse_poll_link(poll_link), answer_text=answer)
+
+
 async def resolve_chat(client: TelegramClient, chat_ref: int | str) -> Any:
     try:
         return await client.get_entity(chat_ref)
@@ -238,6 +305,23 @@ def select_exact_answer(poll: Any, requested_text: str) -> Any:
     raise PollFilterError(f"{detail}\nAvailable answers:\n{available}")
 
 
+def select_option_answer(poll: Any, requested_option: bytes) -> Any:
+    matches = [
+        answer
+        for answer in getattr(poll, "answers", ())
+        if bytes(answer.option) == bytes(requested_option)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise PollFilterError(
+            "The option from the link does not exist in the referenced poll."
+        )
+    raise PollFilterError(
+        "The poll contains the same option identifier more than once."
+    )
+
+
 def vote_options(vote: Any) -> frozenset[bytes]:
     if isinstance(vote, types.MessagePeerVote):
         return frozenset((bytes(vote.option),))
@@ -250,13 +334,19 @@ def vote_options(vote: Any) -> frozenset[bytes]:
     )
 
 
-def _user_record(user: Any, selected_options: frozenset[bytes]) -> VoterRecord:
+def _user_record(
+    user: Any,
+    selected_options: frozenset[bytes],
+    *,
+    used_input_option: bool,
+) -> VoterRecord:
     return VoterRecord(
         id=int(user.id),
         username=getattr(user, "username", None),
         first_name=getattr(user, "first_name", None),
         last_name=getattr(user, "last_name", None),
         selected_options=selected_options,
+        used_input_option=used_input_option,
     )
 
 
@@ -264,6 +354,7 @@ async def fetch_vote_snapshot(
     client: TelegramClient, chat: Any, message_id: int
 ) -> VoteSnapshot:
     selected_options_by_user: dict[int, frozenset[bytes]] = {}
+    input_option_user_ids: set[int] = set()
     users_by_id: dict[int, Any] = {}
     offset: str | None = None
     seen_offsets: set[str] = set()
@@ -305,6 +396,8 @@ async def fetch_vote_snapshot(
                     "The snapshot may have changed; run the command again."
                 )
             selected_options_by_user[user_id] = vote_options(vote)
+            if isinstance(vote, types.MessagePeerVoteInputOption):
+                input_option_user_ids.add(user_id)
 
         next_offset = getattr(result, "next_offset", None) or ""
         if not next_offset:
@@ -330,7 +423,11 @@ async def fetch_vote_snapshot(
         )
 
     voters = tuple(
-        _user_record(users_by_id[user_id], selected_options_by_user[user_id])
+        _user_record(
+            users_by_id[user_id],
+            selected_options_by_user[user_id],
+            used_input_option=user_id in input_option_user_ids,
+        )
         for user_id in sorted(selected_options_by_user)
     )
     return VoteSnapshot(voters=voters, captured_at=datetime.now(timezone.utc))
@@ -351,26 +448,54 @@ def voters_with_answer_count(snapshot: VoteSnapshot, target_option: bytes) -> in
     return sum(option in voter.selected_options for voter in snapshot.voters)
 
 
-def _display_text(value: Any, *, limit: int = 32) -> str:
+def voter_answer_text(voter: VoterRecord, poll: Any) -> str:
+    answers = list(getattr(poll, "answers", ()))
+    known_options = {bytes(answer.option) for answer in answers}
+    unknown_options = voter.selected_options - known_options
+    if unknown_options:
+        raise PollFilterError(
+            f"Poll answer text is unavailable for voter ID {voter.id}. "
+            "The poll may have changed; run the command again."
+        )
+
+    selected_texts = [
+        answer_text(answer)
+        for answer in answers
+        if bytes(answer.option) in voter.selected_options
+    ]
+    if voter.used_input_option:
+        selected_texts.append("[free-text answer; text unavailable]")
+    return " / ".join(selected_texts) or "[no answer text available]"
+
+
+def _display_text(value: Any, *, limit: int | None = 32) -> str:
     if value is None:
         return ""
     normalized = " ".join(str(value).replace("\t", " ").splitlines())
-    if len(normalized) > limit:
+    if limit is not None and len(normalized) > limit:
         return f"{normalized[: limit - 1]}…"
     return normalized
 
 
-def print_voter_table(voters: Sequence[VoterRecord]) -> None:
-    headers = ("ID", "username", "first name", "last name")
-    rows = [
-        (
+def print_voter_table(
+    voters: Sequence[VoterRecord], *, poll: Any | None = None
+) -> None:
+    headers = ["ID", "username", "first name", "last name"]
+    if poll is not None:
+        headers.append("voted for")
+
+    rows: list[tuple[str, ...]] = []
+    for voter in voters:
+        row = [
             str(voter.id),
             _display_text(voter.username),
             _display_text(voter.first_name),
             _display_text(voter.last_name),
-        )
-        for voter in voters
-    ]
+        ]
+        if poll is not None:
+            row.append(_display_text(voter_answer_text(voter, poll), limit=None))
+        rows.append(tuple(row))
+
     widths = [len(header) for header in headers]
     for row in rows:
         for index, cell in enumerate(row):
@@ -379,7 +504,7 @@ def print_voter_table(voters: Sequence[VoterRecord]) -> None:
     def render(row: Sequence[str]) -> str:
         return "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
 
-    print(render(headers))
+    print(render(tuple(headers)))
     print(render(tuple("-" * width for width in widths)))
     for row in rows:
         print(render(row))
