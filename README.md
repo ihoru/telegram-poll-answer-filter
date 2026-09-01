@@ -101,7 +101,7 @@ python list_without_answer.py \
 ```
 
 This appends a `voted for` column containing answer text. Multiple selected
-answers are shown in poll order and separated with `/`. Telegram's free-text
+answers are shown in poll order and separated with `|`. Telegram's free-text
 vote record does not expose the submitted text, so it is shown as
 `[free-text answer; text unavailable]`.
 

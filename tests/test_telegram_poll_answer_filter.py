@@ -263,11 +263,11 @@ class TableTests(unittest.TestCase):
 
         lines = output.getvalue().splitlines()
         self.assertTrue(lines[0].rstrip().endswith("voted for"))
-        self.assertIn("First option / Second option", lines[2])
+        self.assertIn("First option | Second option", lines[2])
         self.assertIn("[free-text answer; text unavailable]", lines[3])
         self.assertEqual(
             voter_answer_text(voters[0], poll),
-            "First option / Second option",
+            "First option | Second option",
         )
 
     def test_voted_for_rejects_option_missing_from_poll(self) -> None:

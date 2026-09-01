@@ -465,7 +465,7 @@ def voter_answer_text(voter: VoterRecord, poll: Any) -> str:
     ]
     if voter.used_input_option:
         selected_texts.append("[free-text answer; text unavailable]")
-    return " / ".join(selected_texts) or "[no answer text available]"
+    return " | ".join(selected_texts) or "[no answer text available]"
 
 
 def _display_text(value: Any, *, limit: int | None = 32) -> str:
