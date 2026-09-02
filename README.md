@@ -1,3 +1,8 @@
+> [!WARNING]
+> This project has moved to
+> [ihoru/telegram-automations](https://github.com/ihoru/telegram-automations).
+> This repository is archived and no longer maintained here.
+
 English | [Русский](README.ru.md)
 
 # Filter Telegram poll participants by answer
